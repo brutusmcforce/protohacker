@@ -20,7 +20,9 @@ defmodule Protohackers.PrimeTimeServer do
       mode: :binary,
       active: false,
       reuseaddr: true,
-      exit_on_close: false
+      exit_on_close: false,
+      packet: :line,
+      buffer: 1024 * 100
     ]
 
     case :gen_tcp.listen(port, listen_options) do
@@ -49,21 +51,43 @@ defmodule Protohackers.PrimeTimeServer do
   ## Helpers
 
   defp handle_connection(socket) do
-    case recv_until_closed(socket, _buffer = "", _buffered_size = 0) do
-      {:ok, data} -> :gen_tcp.send(socket, data)
+    case parse_json(socket) do
+      :ok -> :ok
       {:error, reason} -> Logger.error("Failed to receive data: #{inspect(reason)}")
     end
 
     :gen_tcp.close(socket)
   end
 
-  @limit _100_kb = 1024 * 100
-  defp recv_until_closed(socket, buffer, buffered_size) do
+  defp parse_json(socket) do
     case :gen_tcp.recv(socket, 0, 10_000) do
-      {:ok, data} when buffered_size + byte_size(data) > @limit -> {:error, :buffer_overflow}
-      {:ok, data} -> recv_until_closed(socket, [buffer, data], buffered_size + byte_size(data))
-      {:error, :closed} -> {:ok, buffer}
-      {:error, reason} -> {:error, reason}
+      {:ok, data} ->
+        case Jason.decode(data) do
+          {:ok, %{"method" => "isPrime", "number" => number}} when is_number(number) ->
+            Logger.debug("Received valid request for number: #{number}")
+            response = %{"method" => "isPrime", "prime" => prime?(number)}
+            :gen_tcp.send(socket, [Jason.encode!(response), ?\n])
+            parse_json(socket)
+
+          other ->
+            Logger.debug("Received invalid request: #{inspect(other)}")
+            :gen_tcp.send(socket, "malformed request\n")
+            {:error, :invalid_request}
+        end
+
+      {:error, :closed} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
+  end
+
+  defp prime?(number) when is_float(number), do: false
+  defp prime?(number) when number <= 1, do: false
+  defp prime?(number) when number in [2, 3], do: true
+
+  defp prime?(number) do
+    not Enum.any?(2..trunc(:math.sqrt(number)), &(rem(number, &1) == 0))
   end
 end
